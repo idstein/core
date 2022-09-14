@@ -61,7 +61,9 @@ CONF_WRITE_TYPE = "write_type"
 RTUOVERTCP = "rtuovertcp"
 SERIAL = "serial"
 TCP = "tcp"
+TCPSERVER = "tcpserver"
 UDP = "udp"
+UDPSERVER = "udpserver"
 
 
 # service call attributes

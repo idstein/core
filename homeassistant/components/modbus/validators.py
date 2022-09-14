@@ -7,6 +7,7 @@ import struct
 from typing import Any
 
 import voluptuous as vol
+from pymodbus.constants import Defaults
 
 from homeassistant.const import (
     CONF_ADDRESS,
@@ -35,7 +36,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     PLATFORMS,
     SERIAL,
-    DataType,
+    DataType, TCPSERVER, UDPSERVER, RTUOVERTCP, UDP, TCP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -221,10 +222,17 @@ def duplicate_modbus_validator(config: list) -> list:
     errors = []
     for index, hub in enumerate(config):
         name = hub.get(CONF_NAME, DEFAULT_HUB)
+        host = name
         if hub[CONF_TYPE] == SERIAL:
             host = hub[CONF_PORT]
-        else:
-            host = f"{hub[CONF_HOST]}_{hub[CONF_PORT]}"
+        elif hub[CONF_TYPE] in (TCP, RTUOVERTCP):
+            host = f"tcp://{hub[CONF_HOST]}:{hub[CONF_PORT]}"
+        elif hub[CONF_TYPE] == UDP:
+            host = f"udp://{hub[CONF_HOST]}:{hub[CONF_PORT]}"
+        elif hub[CONF_TYPE] == TCPSERVER:
+            host = f"tcp:{hub.get(CONF_ADDRESS, '')}:{hub.get(CONF_PORT, Defaults.Port)}"
+        elif hub[CONF_TYPE] == UDPSERVER:
+            host = f"udp:{hub.get(CONF_ADDRESS, '')}:{hub.get(CONF_PORT, Defaults.Port)}"
         if host in hosts:
             err = f"Modbus {name}  contains duplicate host/port {host}, not loaded!"
             _LOGGER.warning(err)

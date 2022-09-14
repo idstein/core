@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 from collections import namedtuple
 from collections.abc import Callable
 import logging
+from socketserver import BaseServer
 from typing import Any
 
 from pymodbus.client.sync import (
@@ -12,6 +14,11 @@ from pymodbus.client.sync import (
     ModbusSerialClient,
     ModbusTcpClient,
     ModbusUdpClient,
+)
+from pymodbus.datastore import ModbusServerContext, ModbusSlaveContext
+from pymodbus.server.async_io import (
+    ModbusTcpServer,
+    ModbusUdpServer,
 )
 from pymodbus.constants import Defaults
 from pymodbus.exceptions import ModbusException
@@ -28,7 +35,7 @@ from homeassistant.const import (
     CONF_PORT,
     CONF_TIMEOUT,
     CONF_TYPE,
-    EVENT_HOMEASSISTANT_STOP,
+    EVENT_HOMEASSISTANT_STOP, CONF_ADDRESS,
 )
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 import homeassistant.helpers.config_validation as cv
@@ -72,7 +79,9 @@ from .const import (
     SIGNAL_START_ENTITY,
     SIGNAL_STOP_ENTITY,
     TCP,
+    TCPSERVER,
     UDP,
+    UDPSERVER,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -249,7 +258,10 @@ class ModbusHub:
         """Initialize the Modbus hub."""
 
         # generic configuration
+        self._is_server: bool = False
         self._client: BaseModbusClient | None = None
+        self._server: ModbusTcpServer | ModbusUdpServer | None = None
+        self._server_context: ModbusServerContext | None = None
         self._async_cancel_listener: Callable[[], None] | None = None
         self._in_error = False
         self._lock = asyncio.Lock()
@@ -261,7 +273,9 @@ class ModbusHub:
         self._pb_class = {
             SERIAL: ModbusSerialClient,
             TCP: ModbusTcpClient,
+            TCPSERVER: ModbusTcpServer,
             UDP: ModbusUdpClient,
+            UDPSERVER: ModbusUdpServer,
             RTUOVERTCP: ModbusTcpClient,
         }
         self._pb_params = {
@@ -271,7 +285,19 @@ class ModbusHub:
             "retries": client_config[CONF_RETRIES],
             "retry_on_empty": client_config[CONF_RETRY_ON_EMPTY],
         }
-        if self._config_type == SERIAL:
+        if self._config_type in (TCPSERVER, UDPSERVER):
+            # server configuration
+            self._is_server = True
+            self._server_store = ModbusSlaveContext()
+            self._server_context = ModbusServerContext(slaves=self._server_store)
+            self._pb_params.update(
+                {
+                    "context": self._server_context,
+                    "address":
+                        (client_config[CONF_ADDRESS], client_config[CONF_PORT]),
+                }
+            )
+        elif self._config_type == SERIAL:
             # serial configuration
             self._pb_params.update(
                 {
@@ -305,28 +331,43 @@ class ModbusHub:
             self._in_error = error_state
 
     async def async_setup(self) -> bool:
-        """Set up pymodbus client."""
-        try:
-            self._client = self._pb_class[self._config_type](**self._pb_params)
-        except ModbusException as exception_error:
-            self._log_error(str(exception_error), error_state=False)
-            return False
-
-        for entry in PYMODBUS_CALL:
-            func = getattr(self._client, entry.func_name)
-            self._pb_call[entry.call_type] = RunEntry(entry.attr, func)
-
-        async with self._lock:
-            if not await self.hass.async_add_executor_job(self._pymodbus_connect):
-                err = f"{self.name} connect failed, retry in pymodbus"
-                self._log_error(err, error_state=False)
+        """Set up pymodbus client/server."""
+        if self._is_server:
+            try:
+                self._server = self._pb_class[self._config_type](**self._pb_params)
+            except ModbusException as exception_error:
+                self._log_error(str(exception_error), error_state=False)
+                return False
+            try:
+                self.hass.async_create_task(self._server.serve_forever())
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    _LOGGER.error("Start_server failed, errno: %d", exc.errno)
+                    return False
+                _LOGGER.error("Port %s already in use", self._pb_params["port"])
+                return False
+        else:
+            try:
+                self._client = self._pb_class[self._config_type](**self._pb_params)
+            except ModbusException as exception_error:
+                self._log_error(str(exception_error), error_state=False)
                 return False
 
-        # Start counting down to allow modbus requests.
-        if self._config_delay:
-            self._async_cancel_listener = async_call_later(
-                self.hass, self._config_delay, self.async_end_delay
-            )
+            for entry in PYMODBUS_CALL:
+                func = getattr(self._client, entry.func_name)
+                self._pb_call[entry.call_type] = RunEntry(entry.attr, func)
+
+            async with self._lock:
+                if not await self.hass.async_add_executor_job(self._pymodbus_connect):
+                    err = f"{self.name} connect failed, retry in pymodbus"
+                    self._log_error(err, error_state=False)
+                    return False
+
+            # Start counting down to allow modbus requests.
+            if self._config_delay:
+                self._async_cancel_listener = async_call_later(
+                    self.hass, self._config_delay, self.async_end_delay
+                )
         return True
 
     @callback
@@ -348,6 +389,15 @@ class ModbusHub:
             self._async_cancel_listener()
             self._async_cancel_listener = None
         async with self._lock:
+            if self._server:
+                try:
+                    self._server.server_close()
+                except ModbusException as exception_error:
+                    self._log_error(str(exception_error))
+                del self._server
+                self._server = None
+                message = f"modbus {self.name} server closed"
+                _LOGGER.warning(message)
             if self._client:
                 try:
                     self._client.close()

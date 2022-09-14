@@ -44,7 +44,7 @@ from homeassistant.const import (
     CONF_TIMEOUT,
     CONF_TYPE,
     CONF_UNIQUE_ID,
-    CONF_UNIT_OF_MEASUREMENT,
+    CONF_UNIT_OF_MEASUREMENT, CONF_IP_ADDRESS,
 )
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
@@ -100,7 +100,7 @@ from .const import (
     SERIAL,
     TCP,
     UDP,
-    DataType,
+    DataType, TCPSERVER, UDPSERVER,
 )
 from .modbus import ModbusHub, async_modbus_setup
 from .validators import (
@@ -309,6 +309,14 @@ SERIAL_SCHEMA = MODBUS_SCHEMA.extend(
     }
 )
 
+ETHERNET_SERVER_SCHEMA = MODBUS_SCHEMA.extend(
+    {
+        vol.Required(CONF_TYPE): vol.Any(TCPSERVER, UDPSERVER),
+        vol.Optional(CONF_ADDRESS, default=""): cv.string,
+        vol.Optional(CONF_PORT, default=502): cv.port,
+    }
+)
+
 ETHERNET_SCHEMA = MODBUS_SCHEMA.extend(
     {
         vol.Required(CONF_HOST): cv.string,
@@ -325,7 +333,7 @@ CONFIG_SCHEMA = vol.Schema(
             duplicate_entity_validator,
             duplicate_modbus_validator,
             [
-                vol.Any(SERIAL_SCHEMA, ETHERNET_SCHEMA),
+                vol.Any(SERIAL_SCHEMA, ETHERNET_SCHEMA, ETHERNET_SERVER_SCHEMA),
             ],
         ),
     },
